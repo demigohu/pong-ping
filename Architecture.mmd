@@ -1,0 +1,30 @@
+flowchart TD
+    classDef chain fill:#1a1a1a,stroke:#888,color:#fff
+    classDef relay fill:#0f3057,stroke:#89cff0,color:#fff
+
+    subgraph Mantle["Mantle Sepolia (Public)"]
+        Sender["User Wallet\n(initiates private transfer)"]:::chain
+        Ingress["PrivateTransferIngress\n(escrow MNT/ERC20 + Hyperlane Router)"]:::chain
+        MailboxM["Hyperlane Mailbox (Mantle)\n(sends/receives Hyperlane messages)"]:::chain
+        Receiver["Recipient Wallet\n(gets unlocked funds on Mantle)"]:::chain
+    end
+
+    subgraph Hyperlane["Trusted Relayer"]
+        Relayer["Hyperlane Relayer\n(runs with PRIVATE_KEY,\nrelays Mantle ↔ Sapphire)"]:::relay
+    end
+
+    subgraph Sapphire["Oasis Sapphire (Confidential)"]
+        MailboxS["Hyperlane Mailbox (Sapphire)\n(entrypoint for encrypted messages)"]:::chain
+        Vault["PrivateTransferVault\n(stores ciphertext,\nSapphire.decrypt,\nbuilds release message)"]:::chain
+    end
+
+    Sender -- "lock funds + send\nencrypted payload" --> Ingress
+    Ingress -- "dispatch ciphertext\n(value = 0)" --> MailboxM
+    MailboxM -. "forward message\n(origin Mantle → Sapphire)" .-> Relayer
+    Relayer -. "relay over Hyperlane" .-> MailboxS
+    MailboxS -- "deliver encrypted\npayload to Vault" --> Vault
+    Vault -- "decrypt on Sapphire\n& build release instruction" --> MailboxS
+    MailboxS -. "forward release\ninstruction (Sapphire → Mantle)" .-> Relayer
+    Relayer -. "relay back" .-> MailboxM
+    MailboxM -- "deliver release\ninstruction to Ingress" --> Ingress
+    Ingress -- "release escrowed\nMNT/ERC20 to receiver" --> Receiver

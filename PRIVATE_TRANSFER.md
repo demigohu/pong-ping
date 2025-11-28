@@ -1,0 +1,229 @@
+# Private Transfer Mantle ↔ Sapphire (OPL + Hyperlane)
+
+Panduan ini menjelaskan cara menjalankan alur private transfer menggunakan kombinasi Mantle Sepolia (kontrak publik) dan Sapphire Testnet (kontrak privat). Seluruh kode sudah ada di repo ini.
+
+## 0. Prasyarat
+- Node.js ≥ 18, Hardhat + paket dev sudah terpasang.
+- `.env` berisi:
+  - `PRIVATE_KEY`
+  - `MANTLE_SEPOLIA_RPC`, `SAPPHIRE_TESTNET_RPC`
+  - `MANTLE_MAILBOX`, `SAPPHIRE_MAILBOX`
+- (Opsional) `VAULT_PUBLIC_KEY` untuk menyimpan hasil query public key Vault sehingga klien bisa mengenkripsikan payload tanpa mengambilnya ulang dari jaringan.
+- Relayer Hyperlane siap berjalan untuk domain Mantle (5003) ↔ Sapphire (23295). Lihat panduan relayer Hyperlane [[docs.oasis.io](https://docs.oasis.io/build/opl/hyperlane/)].
+
+## 1. Komponen Kontrak
+- `contracts/privatetransfer/PrivateTransferIngress.sol`
+  - Deploy di Mantle Sepolia.
+  - Menyimpan metadata transfer & meneruskan ciphertext lewat Hyperlane.
+- `contracts/privatetransfer/PrivateTransferVault.sol`
+  - Deploy di Sapphire Testnet.
+  - Menyimpan ciphertext, mendekripsi secara privat dengan kunci rahasia, dan mengirim acknowledgement balik.
+
+## 2. Deploy Kontrak Router
+```bash
+# Mantle ingress
+MANTLE_MAILBOX=0x598f... \
+npx hardhat run scripts/privatetransfer/deploy/deployIngress.ts --network mantleSepolia
+
+# Sapphire vault (kunci disiapkan otomatis oleh Sapphire)
+SAPPHIRE_MAILBOX=0x79d3... \
+npx hardhat run scripts/privatetransfer/deploy/deployVault.ts --network sapphireTestnet
+
+# Deploy ISM di Mantle
+MAILBOX=$MANTLE_MAILBOX TRUSTED_RELAYER=<RELAYER> \
+npx hardhat run scripts/privatetransfer/deploy/deployISM.ts --network mantleSepolia
+```
+Catat alamat hasil deploy sebagai `INGRESS` dan `VAULT`.
+
+## 3. Enroll Router Hyperlane
+```bash
+# Mantle: arahkan domain Sapphire ke Vault
+INGRESS_ADDRESS=<INGRESS> \
+VAULT_ADDRESS=<VAULT> \
+SAPPHIRE_DOMAIN=23295 \
+npx hardhat run scripts/privatetransfer/enroll/enrollIngress.ts --network mantleSepolia
+
+# Sapphire: arahkan domain Mantle ke Ingress
+INGRESS_ADDRESS=<INGRESS> \
+VAULT_ADDRESS=<VAULT> \
+MANTLE_DOMAIN=5003 \
+npx hardhat run scripts/privatetransfer/enroll/enrollVault.ts --network sapphireTestnet
+
+# Daftarkan ISM ke Ingress (router Mantle)
+ROUTER_ADDRESS=<INGRESS_ADDRESS> \
+ISM_ADDRESS=<ISM_MANTLE> \
+npx hardhat run scripts/privatetransfer/enroll/registerIsm.ts --network mantleSepolia
+```
+
+## 4. Pasang TrustedRelayerIsm (opsional tapi direkomendasikan)
+Mengacu tutorial ping-pong Oasis, cukup pasang TrustedRelayerIsm di **Mantle** (chain publik yang menerima pesan balik).
+
+Vault di Sapphire bisa tetap memakai ISM default. Jika ingin membatasi arah Sapphire → Mantle juga, ulangi langkah di atas pada Sapphire, tapi minimal requirement dari docs Oasis hanya di Mantle [[1](https://docs.oasis.io/build/opl/hyperlane/pingpong-example)].
+
+## 5. Jalankan Relayer
+Di shell terpisah:
+```bash
+export HYP_KEY=<PRIVATE_KEY>
+hyperlane relayer --chains mantlesepolia,sapphiretestnet
+```
+Relayer wajib hidup selama kamu ingin pesan lintas chain berjalan.
+
+## 6. Ambil Public Key Vault
+Vault otomatis membuat keypair Curve25519 di Sapphire. Kamu perlu public key‑nya untuk mengenkripsi pesan.
+
+```bash
+VAULT_ADDRESS=<VAULT> \
+npx hardhat run scripts/privatetransfer/service/getVaultPublicKey.ts --network sapphireTestnet
+```
+Simpan output `Vault public key: 0x...` ke `.env` sebagai `VAULT_PUBLIC_KEY`.
+
+## 7. Kirim Private Transfer dari Mantle (lock dana + enkripsi otomatis)
+`scripts/privatetransfer/service/requestTransfer.ts` kini melakukan:
+1. **Mengunci dana**  
+   - `TOKEN_TYPE=native` → mengirim MNT (18 desimal).  
+   - `TOKEN_TYPE=erc20` → mengirim ERC20 (default 6 desimal untuk USDC), otomatis `approve` jika allowance kurang.
+2. **Mengenkripsi payload** `(receiver, token, amount, isNative, memo)` memakai `VAULT_PUBLIC_KEY` via X25519+Deoxys-II.
+3. **Dispatch Hyperlane** ke Sapphire.
+
+Contoh env (semua dalam satu baris perintah):
+```bash
+INGRESS_ADDRESS=0x6Ff7032324dCf4026D28013e605F78B485a81F8e \
+VAULT_PUBLIC_KEY=0xaefda5e647f6262d1c3917b4628a2203d4aa4d2cfb0ed14626b0113c4f204333 \
+RECEIVER=0x<alamat_penerima> \
+AMOUNT=10 \
+TOKEN_TYPE=native \
+TOKEN_DECIMALS=18 \
+DISPATCH_GAS_FEE=0.0005 \
+TESTER_PRIVATE_KEY=0x<opsional: PK pengirim khusus> \
+npx hardhat run scripts/privatetransfer/service/requestTransfer.ts --network mantleSepolia
+```
+
+**⚠️ PENTING**: 
+- `AMOUNT=10` berarti 10 MNT (bukan wei)
+- Pastikan semua env vars diset dalam satu baris perintah (gunakan `\` untuk line continuation)
+- Atau export di shell terlebih dahulu:
+```bash
+export INGRESS_ADDRESS=0x6Ff7032324dCf4026D28013e605F78B485a81F8e
+export VAULT_PUBLIC_KEY=0xaefda5e647f6262d1c3917b4628a2203d4aa4d2cfb0ed14626b0113c4f204333
+export RECEIVER=0x<alamat_penerima>
+export AMOUNT=10
+export TOKEN_TYPE=native
+export TOKEN_DECIMALS=18
+export DISPATCH_GAS_FEE=0.0005   # Opsional; kontrak tetap dispatch dengan value 0
+export TESTER_PRIVATE_KEY=0x<opsional: gunakan akun pengirim lain>
+npx hardhat run scripts/privatetransfer/service/requestTransfer.ts --network mantleSepolia
+```
+> Jika `TESTER_PRIVATE_KEY` (atau `PRIVATE_KEY_2` / `SENDER_PRIVATE_KEY`) di-set, skrip akan membuat wallet baru dan hanya transaksi pengiriman yang memakai akun tersebut; deployer/relayer tetap menggunakan `PRIVATE_KEY` utama.
+Kontrak Ingress hanya menyimpan ciphertext + escrow; data sensitif tetap terenkripsi.
+
+## 7. Proses & Rilis di Sapphire
+Begitu relayer mengirim pesan ke Sapphire, kamu perlu `TRANSFER_ID` untuk memproses transfer.
+
+### Cara Mendapatkan TRANSFER_ID
+`TRANSFER_ID` adalah identifier unik (bytes32) yang dibuat saat transfer dimulai. Kamu bisa mendapatkannya dari:
+
+1. **Event logs di Explorer Mantle** (paling mudah):
+   - Buka transaksi di [Mantle Sepolia Explorer](https://sepolia.mantlescan.xyz)
+   - Scroll ke bagian **"Logs"** atau **"Events"**
+   - Cari event `PrivateTransferInitiated`
+   - Di event tersebut, ada field `transferId` (bytes32) — **ini adalah TRANSFER_ID**
+   - Copy nilai hex-nya (contoh: `0x1234...abcd`)
+
+   Atau via Hardhat console:
+   ```bash
+   npx hardhat console --network mantleSepolia
+   > const ingress = await ethers.getContractAt("PrivateTransferIngress", "<INGRESS>");
+   > const filter = ingress.filters.PrivateTransferInitiated();
+   > const events = await ingress.queryFilter(filter, "latest" - 10, "latest");
+   > events[0].args.transferId; // Ini TRANSFER_ID-nya
+   ```
+
+   **Catatan**: Parameter `[0]` di input function (`0x5aff` = 23295) adalah `destinationDomain` (Sapphire), bukan TRANSFER_ID. TRANSFER_ID ada di event logs, bukan di input parameters.
+
+2. **Return value** dari `requestTransfer.ts` (jika script dimodifikasi untuk print transferId).
+
+3. **Dari event di Sapphire**: Setelah relayer sukses, event `EncryptedTransferStored` di Sapphire juga mengandung `transferId`.
+
+Setelah mendapat `TRANSFER_ID`, **pastikan relayer sudah mengirim pesan ke Sapphire** (cek log relayer untuk konfirmasi sukses).
+
+Kemudian, cek status transfer terlebih dahulu:
+```bash
+VAULT_ADDRESS=<VAULT> \
+TRANSFER_ID=0x<transferId> \
+npx hardhat run scripts/privatetransfer/service/checkTransfer.ts --network sapphireTestnet
+```
+
+Script ini akan menampilkan:
+- Apakah transfer sudah ada di Vault
+- Apakah transfer sudah diproses
+- Apakah signer adalah owner Vault
+
+Jika transfer sudah ada dan belum diproses, jalankan:
+```bash
+VAULT_ADDRESS=<VAULT> \
+TRANSFER_ID=0x<transferId> \
+ACK_GAS_FEE=0 \
+npx hardhat run scripts/privatetransfer/service/ackTransfer.ts --network sapphireTestnet
+```
+> Selama Vault belum memakai Interchain Gas Paymaster, `ACK_GAS_FEE` **harus 0** karena `_Router_dispatch` di Sapphire selalu dikirim tanpa value. Jika ingin membayar gas destinasi lewat IGP, set hook + `payForGas` terlebih dahulu baru izinkan value di sini.
+Skrip tersebut memanggil `PrivateTransferVault.processTransfer`, yang:
+- Mendekripsi payload dengan `Sapphire.decrypt`.
+- Mengirim instruksi rilis (receiver, token, amount, tipe) kembali ke Mantle.
+- Menyimpan payload terdekripsi di `processedPayloads` untuk audit.
+
+## 8. Dana Dirilis di Mantle
+Setelah pesan balik tiba, Ingress akan:
+- Validasi data terhadap escrow.
+- Mengirim MNT native atau ERC20 ke `receiver`.
+- Emit `PrivateTransferAcknowledged` + `PrivateTransferReleased`.
+
+Semua log rilis bisa dipantau melalui Hardhat console atau explorer Mantle.
+
+## 9. Monitoring & Testing
+- Mantle: event `PrivateTransferInitiated` / `PrivateTransferAcknowledged`.
+- Sapphire: event `EncryptedTransferStored` / `TransferAcknowledged`.
+- Pastikan RPC Mantle yang dipakai mendukung `eth_getLogs` range kecil (skrip verifikasi sudah memakai window 5 blok).
+
+## 10. Troubleshooting
+
+### Error: "Transfer not found in Vault"
+**Penyebab**: Pesan dari Mantle belum sampai ke Sapphire.
+
+**Solusi**:
+1. Pastikan relayer Hyperlane sedang berjalan dan memantau kedua chain.
+2. Cek log relayer untuk melihat apakah pesan sudah di-relay:
+   ```
+   Observed message 0x... on mantlesepolia to sapphiretestnet
+   Relaying message 0x...
+   ```
+3. Tunggu beberapa detik/menit sampai relayer selesai mengirim pesan.
+4. Jalankan `checkTransfer.ts` lagi untuk memverifikasi.
+
+### Error: "transaction execution reverted" saat ackTransfer
+**Penyebab**:
+- Transfer belum ada di Vault (relayer belum relay)
+- TRANSFER_ID salah
+- Signer bukan owner Vault
+- Transfer sudah diproses
+- Payload tidak bisa di-decode (format tidak sesuai)
+
+**Solusi**:
+1. Jalankan `checkTransfer.ts` untuk melihat status transfer.
+2. Pastikan kamu menggunakan `PRIVATE_KEY` yang sama dengan owner Vault (yang deploy Vault).
+3. Verifikasi `TRANSFER_ID` dari event logs di Mantle explorer.
+4. Pastikan relayer sudah mengirim pesan (lihat log relayer).
+5. Jika payload tidak bisa di-decode, pastikan format payload di `requestTransfer.ts` sesuai dengan `PrivatePayload` struct.
+
+### Error: "MerkleTreeHook: no value expected"
+**Penyebab**: Hook di Mailbox tidak menerima value.
+
+**Solusi**: Sudah diperbaiki di kontrak terbaru (selalu kirim value 0). Pastikan kamu menggunakan kontrak yang sudah di-redeploy.
+
+## 11. Catatan Penting
+- Mantle tetap publik; semua enkripsi terjadi di klien menggunakan public key Vault, jadi plaintext tidak pernah muncul di Mantle.
+- Vault menyimpan secret key Curve25519 di Sapphire (confidential) dan otomatis memanfaatkan `Sapphire.decrypt`.
+- Gunakan `TOKEN_DECIMALS` yang benar (contoh: USDC Mantle Sepolia = 6) agar jumlah yang dikunci sama dengan jumlah yang dirilis.
+- Dokumentasi umum OPL & Hyperlane: [[docs.oasis.io](https://docs.oasis.io/build/opl/)], [[docs.oasis.io/hyperlane](https://docs.oasis.io/build/opl/hyperlane/)].
+
+Dengan alur ini, alamat/amount sensitif tidak pernah muncul di chain publik Mantle. Mantle hanya menampung ciphertext dan status. Eksekusi & penyimpanan data privat sepenuhnya terjadi di Sapphire melalui Oasis Privacy Layer.
+
