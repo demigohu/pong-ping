@@ -1,6 +1,6 @@
 # Private Transfer on Mantle Sepolia (Hyperlane + Oasis Sapphire)
 
-This repository contains an end‑to‑end demo of a private cross‑chain transfer built on:
+This repository contains an end‑to‑end demo of a private transfer built on:
 
 - **Mantle Sepolia** – runs `PrivateTransferIngress.sol`, which escrows native MNT/USDC and forwards encrypted payloads through Hyperlane’s Mailbox.
 - **Oasis Sapphire Testnet** – runs `PrivateTransferVault.sol`, which decrypts the payload via `Sapphire.decrypt`, decides who should receive the funds, and relays a release instruction back to Mantle.
