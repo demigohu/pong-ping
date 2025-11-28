@@ -1,4 +1,4 @@
-# Private Cross‑Chain Transfer (Hyperlane + Oasis Sapphire)
+# Private Transfer on Mantle Sepolia (Hyperlane + Oasis Sapphire)
 
 This repository contains an end‑to‑end demo of a private cross‑chain transfer built on:
 
