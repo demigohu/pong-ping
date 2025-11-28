@@ -96,31 +96,37 @@ flowchart TD
     classDef relay fill:#0f3057,stroke:#89cff0,color:#fff
 
     subgraph Mantle["Mantle Sepolia (Public)"]
-        Sender["User Wallet\n(initiates private transfer)"]:::chain
-        Ingress["PrivateTransferIngress\n(escrow MNT/ERC20 + Hyperlane Router)"]:::chain
-        MailboxM["Hyperlane Mailbox\n(Mantle)"]:::chain
-        Receiver["Recipient Wallet\n(gets unlocked funds on Mantle)"]:::chain
+        Sender["User Wallet 
+        (initiates private transfer)"]:::chain
+        Ingress["PrivateTransferIngress 
+        (escrow MNT/ERC20 + Hyperlane Router)"]:::chain
+        MailboxM["Hyperlane Mailbox (Mantle)"]:::chain
+        Receiver["Recipient Wallet 
+        (gets unlocked funds on Mantle)"]:::chain
     end
 
     subgraph Hyperlane["Trusted Relayer"]
-        Relayer["Hyperlane Relayer\n(PRIVATE_KEY)"]:::relay
+        Relayer["Hyperlane Relayer (PRIVATE_KEY)"]:::relay
     end
 
     subgraph Sapphire["Oasis Sapphire (Confidential)"]
-        MailboxS["Hyperlane Mailbox\n(Sapphire)"]:::chain
-        Vault["PrivateTransferVault\n(stores ciphertext,\nSapphire.decrypt,\nbuilds release message)"]:::chain
+        MailboxS["Hyperlane Mailbox 
+        (Sapphire)"]:::chain
+        Vault["PrivateTransferVault 
+        (stores ciphertext, Sapphire.decrypt, builds release message)"]:::chain
     end
 
-    Sender -->|"lock funds + send\nencrypted payload"| Ingress
-    Ingress -->|"dispatch ciphertext\n(value = 0)"| MailboxM
-    MailboxM -. "forward message\n(Mantle → Sapphire)" .-> Relayer
+    Sender -->|"lock funds + send nencrypted payload"| Ingress
+    Ingress -->|"dispatch ciphertext (value = 0)"| MailboxM
+    MailboxM -. "forward message 
+    (Mantle → Sapphire)" .-> Relayer
     Relayer -. "relay over Hyperlane" .-> MailboxS
-    MailboxS -->|"deliver encrypted\npayload to Vault"| Vault
-    Vault -->|"decrypt on Sapphire\n& build release instruction"| MailboxS
-    MailboxS -. "send release\ninstruction (Sapphire → Mantle)" .-> Relayer
+    MailboxS -->|"deliver encrypted payload to Vault"| Vault
+    Vault -->|"decrypt on Sapphire & build release instruction"| MailboxS
+    MailboxS -. "send release instruction (Sapphire → Mantle)" .-> Relayer
     Relayer -. "relay back" .-> MailboxM
-    MailboxM -->|"deliver release\ninstruction to Ingress"| Ingress
-    Ingress -->|"release escrowed\nMNT/ERC20 to receiver"| Receiver
+    MailboxM -->|"deliver release instruction to Ingress"| Ingress
+    Ingress -->|"release escrowed MNT/ERC20 to receiver"| Receiver
 ```
 
 ---
