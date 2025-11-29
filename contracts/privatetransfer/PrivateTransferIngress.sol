@@ -32,24 +32,26 @@ contract PrivateTransferIngress is Router {
     mapping(bytes32 => TransferMetadata) public transfers;
     mapping(bytes32 => Deposit) public deposits;
 
+    /**
+     * @notice Emitted when a private transfer is initiated.
+     * @dev Only emits transferId, sender, destination, and ciphertext hash.
+     *      Sensitive data (token, amount, isNative) are NOT emitted for privacy.
+     */
     event PrivateTransferInitiated(
         bytes32 indexed transferId,
         address indexed sender,
         uint32 indexed destinationDomain,
-        bytes32 ciphertextHash,
-        address token,
-        uint256 amount,
-        bool isNative
+        bytes32 ciphertextHash
     );
 
     event PrivateTransferAcknowledged(bytes32 indexed transferId);
-    event PrivateTransferReleased(
-        bytes32 indexed transferId,
-        address indexed receiver,
-        address token,
-        uint256 amount,
-        bool isNative
-    );
+    
+    /**
+     * @notice Emitted when funds are released to the receiver.
+     * @dev Only emits transferId for privacy. Sensitive data (receiver, token, amount, isNative)
+     *      are NOT emitted. These details are only visible in Sapphire's confidential execution.
+     */
+    event PrivateTransferReleased(bytes32 indexed transferId);
 
     constructor(address mailbox) Router(mailbox) {
         _transferOwnership(msg.sender);
@@ -156,10 +158,7 @@ contract PrivateTransferIngress is Router {
             transferId,
             msg.sender,
             destinationDomain,
-            keccak256(ciphertext),
-            token,
-            amount,
-            isNative
+            keccak256(ciphertext)
         );
     }
 
@@ -204,7 +203,7 @@ contract PrivateTransferIngress is Router {
         }
 
         emit PrivateTransferAcknowledged(transferId);
-        emit PrivateTransferReleased(transferId, receiver, token, amount, isNative);
+        emit PrivateTransferReleased(transferId);
     }
 }
 

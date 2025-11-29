@@ -219,11 +219,52 @@ Semua log rilis bisa dipantau melalui Hardhat console atau explorer Mantle.
 
 **Solusi**: Sudah diperbaiki di kontrak terbaru (selalu kirim value 0). Pastikan kamu menggunakan kontrak yang sudah di-redeploy.
 
-## 11. Catatan Penting
+## 11. Privacy Limitations & Trade-offs
+
+### Data yang TETAP Terlihat di Mantle (Public Chain)
+
+Meskipun kontrak sudah di-update untuk tidak mem-publish data sensitif di event logs, beberapa informasi masih bisa terlihat:
+
+1. **ERC20 Transfer Events** (Tidak Bisa Dihindari)
+   - Event `Transfer` dari kontrak ERC20 (misalnya USDC) akan tetap muncul di logs
+   - Menampilkan: `from` (Ingress contract), `to` (receiver), `value` (amount)
+   - **Alasan**: Ini adalah bagian dari standar ERC20 dan tidak bisa diubah tanpa memodifikasi kontrak token itu sendiri
+   - **Solusi**: Untuk privacy maksimal, pertimbangkan menggunakan native token (MNT) atau token custom yang tidak emit event
+
+2. **Native Transfer Balance Changes**
+   - Perubahan balance di address receiver tetap terlihat di blockchain
+   - **Alasan**: Blockchain adalah public ledger, semua balance changes terlihat
+   - **Solusi**: Tidak ada solusi teknis untuk ini di level smart contract
+
+3. **Event `PrivateTransferInitiated`** (Sudah Diperbaiki)
+   - ✅ Sekarang hanya emit: `transferId`, `sender`, `destinationDomain`, `ciphertextHash`
+   - ❌ Tidak lagi emit: `token`, `amount`, `isNative`
+
+4. **Event `PrivateTransferReleased`** (Sudah Diperbaiki)
+   - ✅ Sekarang hanya emit: `transferId`
+   - ❌ Tidak lagi emit: `receiver`, `token`, `amount`, `isNative`
+
+### Data yang TETAP Private
+
+1. **Receiver Address** - Hanya terlihat di Sapphire (confidential execution)
+2. **Amount** - Hanya terlihat di Sapphire (kecuali untuk ERC20 Transfer event)
+3. **Memo** - Sepenuhnya private, hanya di Sapphire
+4. **Ciphertext Content** - Tidak bisa di-decode tanpa secret key Vault
+
+### Rekomendasi untuk Privacy Maksimal
+
+- **Gunakan Native Token (MNT)** untuk menghindari ERC20 Transfer events
+- **Gunakan Multiple Intermediate Addresses** untuk memecah link on-chain
+- **Pertimbangkan Mixing Layer** tambahan jika diperlukan privacy level yang lebih tinggi
+
+## 12. Catatan Penting
 - Mantle tetap publik; semua enkripsi terjadi di klien menggunakan public key Vault, jadi plaintext tidak pernah muncul di Mantle.
 - Vault menyimpan secret key Curve25519 di Sapphire (confidential) dan otomatis memanfaatkan `Sapphire.decrypt`.
 - Gunakan `TOKEN_DECIMALS` yang benar (contoh: USDC Mantle Sepolia = 6) agar jumlah yang dikunci sama dengan jumlah yang dirilis.
+- **Event logs sudah di-update untuk tidak mem-publish data sensitif**, namun ERC20 Transfer events tetap terlihat karena bagian dari standar token.
 - Dokumentasi umum OPL & Hyperlane: [[docs.oasis.io](https://docs.oasis.io/build/opl/)], [[docs.oasis.io/hyperlane](https://docs.oasis.io/build/opl/hyperlane/)].
 
-Dengan alur ini, alamat/amount sensitif tidak pernah muncul di chain publik Mantle. Mantle hanya menampung ciphertext dan status. Eksekusi & penyimpanan data privat sepenuhnya terjadi di Sapphire melalui Oasis Privacy Layer.
+Dengan alur ini, alamat/amount sensitif tidak pernah muncul di chain publik Mantle **melalui event logs kontrak kita**. Mantle hanya menampung ciphertext dan status. Eksekusi & penyimpanan data privat sepenuhnya terjadi di Sapphire melalui Oasis Privacy Layer.
+
+
 
