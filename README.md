@@ -189,31 +189,39 @@ The relayer will pay gas using the deployer key you provide.
 
 ---
 
-## 5. Sending a Private Transfer
+## 5. Sending a Private Transfer (Deposit → Initiate)
 
-Use the helper script to escrow MNT/ERC‑20 and send an encrypted payload to Sapphire:
+Flow dua langkah: deposit bisa dipakai berkali-kali sampai saldo 0, lalu kirim instruksi terenkripsi.
 
+### 5.1 Deposit (native / ERC20)
 ```bash
+# native
+npx hardhat run scripts/privatetransfer/service/deposit.ts --network mantleSepolia \
+  --type native --amount 5 --ingress $INGRESS_ADDRESS --pk $SENDER_PK
 
-# INGRESS_ADDRESS=<MANTLE_INGRESS> 
-# VAULT_PUBLIC_KEY=<VAULT_PUBLIC_KEY> 
-# RECEIVER=0xRecipientOnMantle 
-# AMOUNT=10 
-# TOKEN_TYPE=native 
-# TOKEN_DECIMALS=18 
-# DISPATCH_GAS_FEE=0.0005 
-# TESTER_PRIVATE_KEY=$TESTER_PRIVATE_KEY 
-# Ensure U have set the ENV and then run the script
+# erc20
+npx hardhat run scripts/privatetransfer/service/deposit.ts --network mantleSepolia \
+  --type erc20 --token $TOKEN_ADDRESS --decimals 6 --amount 5 --ingress $INGRESS_ADDRESS --pk $SENDER_PK
+```
+Catat `DepositId` dari event `DepositCreated`. Satu depositId dapat dipakai beberapa kali sampai saldo habis.
+
+### 5.2 Initiate transfer (hanya encrypted instructions)
+```bash
+INGRESS_ADDRESS=...
+VAULT_PUBLIC_KEY=0x...32bytes
+RECEIVER=0xReceiver
+AMOUNT=2
+TOKEN_TYPE=native        # atau erc20
+TOKEN_DECIMALS=18        # atau sesuai token
+DEPOSIT_ID=<DepositId_dari_step_5.1>
 npx hardhat run scripts/privatetransfer/service/requestTransfer.ts --network mantleSepolia
 ```
 
-What it does:
-
-1. Locks the `AMOUNT` in `PrivateTransferIngress`.
-2. Encrypts `{receiver, token, amount, isNative, memo}` using the Vault’s public key (X25519 + Deoxys-II).
-3. Dispatches the ciphertext to Sapphire through the Hyperlane Mailbox (value always 0, relayer pays gas).
-4. Prints the `TRANSFER_ID` and Mantle Tx hash.
-5. Copy the TRANSFER_ID and set on env, if u do this again, as always update the `TRANSFER_ID`
+Apa yang terjadi:
+1. Off-chain pre-check: depositId harus milik pengirim, belum released, token/type cocok, dan saldo deposit >= AMOUNT.
+2. Enkripsi `{receiver, token, amount, isNative, memo}` (X25519 + Deoxys-II).
+3. Dispatch ciphertext ke Sapphire via Hyperlane (value 0; relayer/IGP bayar gas).
+4. Cetak `encryptedDataHash` dan lookup `TRANSFER_ID` via `getTransferIdByCiphertextHash`.
 
 You can check the status on Sapphire:
 
@@ -241,29 +249,30 @@ npx hardhat run scripts/privatetransfer/service/ackTransfer.ts --network sapphir
 
 - The script prints the Sapphire tx hash (look for `PrivatePayloadProcessed`).
 
-After the relayer finishes, check Mantle’s Ingress events or re-run `checkTransfer.ts` pointing at the Mantle contract to confirm `released = true`.
+After the relayer finishes, funds will be **directly transferred** to the receiver (persis seperti Umbra - tidak ada withdrawal).
+
+**Important**: Event logs in Mantle now only emit **encrypted data hash**, making transactions look like **encrypted instructions** (persis seperti Umbra). This creates minimal on-chain footprint, exactly like Umbra's approach where only encrypted instructions are visible on the public chain. All computation happens in Oasis (confidential), just like Umbra uses Arcium for confidential computation.
+
+**Pattern:**
+- ✅ Mantle: Hanya encrypted instructions hash (minimal footprint)
+- ✅ Oasis: Computation di confidential environment (Sapphire.decrypt)
+- ✅ Event logs: Hanya `EncryptedInstructionsReceived` dan `EncryptedInstructionsProcessed`
+- ✅ Privacy: Tidak ada data sensitif yang terlihat di Mantle
+- ✅ Transfer: Langsung transfer ke receiver (persis seperti Umbra - tidak ada withdrawal)
+
+**Kenapa kita pakai Sapphire?**
+- Karena cross-chain, kita perlu trusted party (Vault owner) untuk decrypt dan build release instruction
+- User bisa decrypt sendiri untuk verify (optional) - lihat `WHY_SAPPHIRE_AND_USER_DECRYPT.md` untuk detail
 
 ---
 
 ## 7. Optional: Multiple Tester Accounts
 
-`requestTransfer.ts` will automatically use these env variables (first match wins) to build a custom `ethers.Wallet` for the sender:
-
+`requestTransfer.ts` memilih wallet dari env (prioritas):
 1. `TESTER_PRIVATE_KEY`
 2. `PRIVATE_KEY_2`
 3. `SENDER_PRIVATE_KEY`
-4. Fallback: Hardhat’s default signer (`PRIVATE_KEY`)
-
-That means you can run:
-
-```bash
-TESTER_PRIVATE_KEY=0xyour_test_account_pk \
-INGRESS_ADDRESS=... \
-VAULT_PUBLIC_KEY=... \
-npx hardhat run scripts/privatetransfer/service/requestTransfer.ts --network mantleSepolia
-```
-
-without touching the deployer/relayer key.
+4. `PRIVATE_KEY` (fallback)
 
 ---
 

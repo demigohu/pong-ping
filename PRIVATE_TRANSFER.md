@@ -264,7 +264,46 @@ Meskipun kontrak sudah di-update untuk tidak mem-publish data sensitif di event 
 - **Event logs sudah di-update untuk tidak mem-publish data sensitif**, namun ERC20 Transfer events tetap terlihat karena bagian dari standar token.
 - Dokumentasi umum OPL & Hyperlane: [[docs.oasis.io](https://docs.oasis.io/build/opl/)], [[docs.oasis.io/hyperlane](https://docs.oasis.io/build/opl/hyperlane/)].
 
+---
+
+## 13. Withdraw Pattern (Seperti Umbra - Bukan Transfer Langsung!)
+
+**PENTING**: Implementasi sekarang menggunakan **withdraw pattern** yang membuat transfer terlihat seperti **deposit/withdraw** bukan **transfer langsung**, mirip dengan Umbra's private payment approach.
+
+### Cara Kerja:
+
+1. **Sender deposit** ke Ingress contract (terlihat seperti deposit biasa)
+2. **Sapphire decrypt** dan store funds untuk withdrawal (tidak langsung transfer)
+3. **Receiver withdraw** dari contract (terlihat seperti withdraw biasa)
+
+**Keuntungan:**
+- ✅ Transfer tidak terlihat seperti "kirim ke receiver"
+- ✅ Terlihat seperti deposit/withdraw pattern
+- ✅ Tidak ada link langsung antara deposit dan withdraw
+- ✅ Mirip dengan Umbra's private payment
+
+### Check Pending Withdrawals:
+
+```bash
+# INGRESS_ADDRESS=<MANTLE_INGRESS>
+# RECEIVER=<RECEIVER_ADDRESS>
+npx hardhat run scripts/privatetransfer/service/checkPendingWithdrawals.ts --network mantleSepolia
+```
+
+### Withdraw Funds:
+
+```bash
+# INGRESS_ADDRESS=<MANTLE_INGRESS>
+# WITHDRAW_INDEX=0
+# TESTER_PRIVATE_KEY=<RECEIVER_PRIVATE_KEY>
+npx hardhat run scripts/privatetransfer/service/withdraw.ts --network mantleSepolia
+```
+
+---
+
 Dengan alur ini, alamat/amount sensitif tidak pernah muncul di chain publik Mantle **melalui event logs kontrak kita**. Mantle hanya menampung ciphertext dan status. Eksekusi & penyimpanan data privat sepenuhnya terjadi di Sapphire melalui Oasis Privacy Layer.
+
+**Plus**, dengan withdraw pattern, transfer tidak terlihat seperti transfer langsung, melainkan seperti deposit/withdraw biasa, mirip dengan Umbra's private payment approach! 🚀
 
 
 

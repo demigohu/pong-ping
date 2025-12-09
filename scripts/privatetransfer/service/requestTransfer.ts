@@ -16,6 +16,7 @@ async function main() {
   const isNative = tokenType === "native";
   const tokenAddress = process.env.TOKEN_ADDRESS;
   const memo = process.env.PRIVATE_MEMO ?? "";
+  const useDepositId = process.env.DEPOSIT_ID; // optional: skip deposit step if provided
 
   if (!ingressAddress) {
     throw new Error("Set INGRESS_ADDRESS env var");
@@ -36,7 +37,7 @@ async function main() {
   }
 
   const decimals = Number(
-    process.env.TOKEN_DECIMALS ?? (isNative ? "18" : "6")
+    process.env.TOKEN_DECIMALS ?? (tokenType === "native" ? "18" : "6")
   );
   if (Number.isNaN(decimals)) {
     throw new Error("Invalid TOKEN_DECIMALS value");
@@ -120,12 +121,13 @@ async function main() {
     [envelope]
   );
 
-  const testerPk =
-    process.env.TESTER_PRIVATE_KEY ??
-    process.env.PRIVATE_KEY_2 ??
-    process.env.SENDER_PRIVATE_KEY;
-  const signer = testerPk
-    ? new ethers.Wallet(testerPk, ethers.provider)
+  const signerPk =
+    process.env.TESTER_PRIVATE_KEY ||
+    process.env.PRIVATE_KEY_2 ||
+    process.env.SENDER_PRIVATE_KEY ||
+    process.env.PRIVATE_KEY;
+  const signer = signerPk
+    ? new ethers.Wallet(signerPk, ethers.provider)
     : await ethers.provider.getSigner();
   const senderAddress = await signer.getAddress();
   console.log(`Using signer: ${senderAddress}`);
@@ -140,22 +142,64 @@ async function main() {
   const gasFee = ethers.parseEther(process.env.DISPATCH_GAS_FEE ?? "0");
 
   let tx;
-  if (isNative) {
-    const depositAmount = amount;
-    const totalValue = depositAmount + gasFee;
-    console.log(`\n=== Native Transfer Details ===`);
-    console.log(`Deposit Amount: ${ethers.formatEther(depositAmount)} MNT`);
-    console.log(`Gas Fee: ${ethers.formatEther(gasFee)} MNT`);
-    console.log(`Total Value: ${ethers.formatEther(totalValue)} MNT`);
-    console.log(`\nSending transaction...`);
-    tx = await contract.initiateNativeTransfer(
-      destinationDomain,
-      envelopeBytes,
-      depositAmount,
-      {
-        value: totalValue,
+  let depositId: string | undefined;
+
+  if (useDepositId) {
+    depositId = useDepositId;
+    console.log(`Using provided depositId: ${depositId}`);
+    // Validate ownership early to avoid revert
+    try {
+      const dep = await contract.deposits(depositId);
+      if (dep.depositor.toLowerCase() !== senderAddress.toLowerCase()) {
+        throw new Error(
+          `Deposit belongs to ${dep.depositor}, not ${senderAddress} (not your deposit)`
+        );
       }
-    );
+      if (dep.released) {
+        throw new Error(`Deposit already used/released`);
+      }
+      if (dep.isNative !== isNative) {
+        throw new Error(`Deposit type mismatch (expected ${isNative ? "native" : "erc20"})`);
+      }
+      if (!dep.isNative && tokenAddress && dep.token.toLowerCase() !== tokenAddress.toLowerCase()) {
+        throw new Error(`Deposit token mismatch. Deposit token: ${dep.token}, input token: ${tokenAddress}`);
+      }
+      if (dep.amount < amount) {
+        throw new Error(
+          `Deposit insufficient: remaining ${dep.amount.toString()} < requested ${amount.toString()}`
+        );
+      }
+      console.log(
+        `Deposit check: token=${dep.token}, amount=${dep.amount.toString()}, isNative=${dep.isNative}`
+      );
+    } catch (e) {
+      throw new Error(`Deposit validation failed: ${(e as Error).message}`);
+    }
+  } else if (isNative) {
+    console.log(`\n=== Step 1: Deposit Funds (Umbra-like Pattern) ===`);
+    const depositAmount = amount;
+    const depositTx = await contract.depositNative({
+      value: depositAmount,
+    });
+    console.log(`Deposit tx: ${depositTx.hash}`);
+    const depositReceipt = await depositTx.wait();
+    
+    const depositEvent = depositReceipt?.logs.find((log: any) => {
+      try {
+        const parsed = contract.interface.parseLog(log);
+        return parsed?.name === "DepositCreated";
+      } catch {
+        return false;
+      }
+    });
+    
+    if (!depositEvent) {
+      throw new Error("Could not find DepositCreated event");
+    }
+    
+    const parsedDeposit = contract.interface.parseLog(depositEvent);
+    depositId = parsedDeposit?.args.depositId;
+    console.log(`Deposit ID: ${depositId}`);
   } else {
     const token = await ethers.getContractAt(
       erc20Abi,
@@ -168,25 +212,53 @@ async function main() {
       const approveTx = await token.approve(ingressAddress, amount);
       await approveTx.wait();
     }
-    tx = await contract.initiateErc20Transfer(
-      destinationDomain,
-      tokenAddress,
-      amount,
-      envelopeBytes,
-      {
-        value: gasFee,
+
+    console.log(`\n=== Step 1: Deposit ERC20 (Umbra-like Pattern) ===`);
+    const depositTx = await contract.depositErc20(tokenAddress as string, amount);
+    console.log(`Deposit tx: ${depositTx.hash}`);
+    const depositReceipt = await depositTx.wait();
+
+    const depositEvent = depositReceipt?.logs.find((log: any) => {
+      try {
+        const parsed = contract.interface.parseLog(log);
+        return parsed?.name === "DepositCreated";
+      } catch {
+        return false;
       }
-    );
+    });
+
+    if (!depositEvent) {
+      throw new Error("Could not find DepositCreated event (ERC20)");
+    }
+
+    const parsedDeposit = contract.interface.parseLog(depositEvent);
+    depositId = parsedDeposit?.args.depositId;
+    console.log(`Deposit ID: ${depositId}`);
   }
+
+  if (!depositId) {
+    throw new Error("depositId not available");
+  }
+
+  console.log(`\n=== Step 2: Initiate Transfer (Only Encrypted Instructions) ===`);
+  console.log(`Only encrypted instructions in call data - persis seperti Umbra!`);
+  console.log(`No amount visible in transfer initiation - amount already in contract from deposit`);
+
+  tx = await contract.initiateTransfer(
+    destinationDomain,
+    depositId,
+    ethers.getBytes(encodedEnvelope)
+  );
 
   console.log("Dispatching encrypted payload and locking funds...");
   const receipt = await tx.wait();
   
-  // Extract transferId from event
+  // Extract encrypted hash and transferId
+  let encryptedDataHash: string | undefined;
   const event = receipt?.logs.find((log: any) => {
     try {
       const parsed = contract.interface.parseLog(log);
-      return parsed?.name === "PrivateTransferInitiated";
+      return parsed?.name === "EncryptedInstructionsReceived";
     } catch {
       return false;
     }
@@ -194,15 +266,32 @@ async function main() {
   
   if (event) {
     const parsed = contract.interface.parseLog(event);
-    const transferId = parsed?.args.transferId;
+    encryptedDataHash = parsed?.args.encryptedDataHash;
     console.log(`Transfer dispatched in tx ${receipt?.hash}`);
-    console.log(`TRANSFER_ID: ${transferId}`);
-    console.log(`\nUse this TRANSFER_ID for ackTransfer.ts:`);
-    console.log(`TRANSFER_ID=${transferId} npx hardhat run scripts/privatetransfer/service/ackTransfer.ts --network sapphireTestnet`);
+    console.log(`Encrypted Data Hash: ${encryptedDataHash}`);
+    console.log(`\n✅ Umbra-like pattern: Only encrypted instructions hash visible in event!`);
   } else {
     console.log(`Transfer dispatched in tx ${receipt?.hash}`);
-    console.log(`Note: Could not extract TRANSFER_ID from event. Query it from event logs.`);
+    console.log(`Note: Could not extract event. Query from event logs.`);
   }
+
+  let transferId: string | undefined;
+  if (encryptedDataHash) {
+    try {
+      transferId = await contract.getTransferIdByCiphertextHash(encryptedDataHash);
+      if (transferId === ethers.ZeroHash) transferId = undefined;
+    } catch (e) {
+      console.log("Could not fetch transferId by hash:", (e as Error).message);
+    }
+  }
+
+  if (transferId) {
+    console.log(`TRANSFER_ID (lookup via hash): ${transferId}`);
+  } else {
+    console.log("TRANSFER_ID not resolved. You can query getTransferIdByCiphertextHash(hash).");
+  }
+
+  // Ack dilakukan manual (script ini tidak auto-ack). Gunakan ackTransfer.ts dengan TRANSFER_ID.
 }
 
 main().catch((error) => {
