@@ -266,7 +266,319 @@ After the relayer finishes, funds will be **directly transferred** to the receiv
 
 ---
 
-## 7. Optional: Multiple Tester Accounts
+## 7. Private Lending PoC (Mantle + Sapphire, Umbra-style)
+
+### 7.0 Architecture Diagram
+
+Berikut diagram arsitektur high-level dari alur private lending (Mantle → Sapphire → Mantle) menggunakan Hyperlane:
+
+```mermaid
+flowchart TD
+    classDef chain fill:#1a1a1a,stroke:#888,color:#fff
+    classDef relay fill:#0f3057,stroke:#89cff0,color:#fff
+    classDef confidential fill:#2d5016,stroke:#4a9b2f,color:#fff
+    classDef action fill:#4a148c,stroke:#9c27b0,color:#fff
+
+    subgraph Mantle["Mantle Sepolia (Public Chain)"]
+        User["👤 User Wallet<br/>(Submit Actions)"]:::chain
+        Ingress["PrivateLendingIngress<br/>(Escrow Funds +<br/>Hyperlane Router)"]:::chain
+        MailboxM["Hyperlane Mailbox<br/>(Mantle)"]:::chain
+        Receiver["💰 User Wallet<br/>(Receive Funds)"]:::chain
+        Adapter["Adapter Contract<br/>(Optional - for DeFi)"]:::chain
+    end
+
+    subgraph Hyperlane["Hyperlane Relayer"]
+        Relayer["Hyperlane Relayer<br/>(PRIVATE_KEY)"]:::relay
+    end
+
+    subgraph Sapphire["Oasis Sapphire (Confidential EVM)"]
+        MailboxS["Hyperlane Mailbox<br/>(Sapphire)"]:::chain
+        LendingCore["LendingCore<br/>(Decrypt Actions,<br/>Manage Positions,<br/>Calculate HF,<br/>Accrue Interest)"]:::confidential
+        Oracle["ROFL Oracle<br/>(Price Feeds)"]:::confidential
+    end
+
+    subgraph Actions["Encrypted Actions"]
+        Supply["SUPPLY<br/>(Deposit Collateral)"]:::action
+        Borrow["BORROW<br/>(Borrow with Collateral)"]:::action
+        Repay["REPAY<br/>(Pay Back Loan)"]:::action
+        Withdraw["WITHDRAW<br/>(Withdraw Collateral)"]:::action
+        Liquidate["LIQUIDATE<br/>(Liquidate Position)"]:::action
+    end
+
+    %% User submits action
+    User -->|"1. Deposit Funds<br/>(Native/ERC20)"| Ingress
+    User -->|"2. Submit Encrypted Action<br/>(Ciphertext Hash Only)"| Ingress
+    
+    %% Ingress escrows and dispatches
+    Ingress -->|"3. Escrow Funds<br/>(Amount Visible)"| Ingress
+    Ingress -->|"4. Dispatch Encrypted Payload<br/>(Value = 0, Ciphertext Only)"| MailboxM
+    
+    %% Hyperlane relay
+    MailboxM -. "5. Forward Message<br/>(Mantle → Sapphire)" .-> Relayer
+    Relayer -. "6. Relay over Hyperlane" .-> MailboxS
+    
+    %% Sapphire receives and processes
+    MailboxS -->|"7. Deliver Encrypted Action"| LendingCore
+    LendingCore -->|"8. Query Price"| Oracle
+    Oracle -->|"9. Return Price Data"| LendingCore
+    
+    %% LendingCore processes action
+    LendingCore -->|"10. Decrypt Payload<br/>(Sapphire.decrypt)"| LendingCore
+    LendingCore -->|"11. Update Position<br/>(Private State)"| LendingCore
+    LendingCore -->|"12. Calculate Health Factor<br/>(Confidential)"| LendingCore
+    LendingCore -->|"13. Accrue Interest<br/>(Compound-style)"| LendingCore
+    
+    %% Release instruction back to Mantle
+    LendingCore -->|"14. Build Release Instruction<br/>(If BORROW/WITHDRAW/LIQUIDATE)"| MailboxS
+    MailboxS -. "15. Send Release Instruction<br/>(Sapphire → Mantle)" .-> Relayer
+    Relayer -. "16. Relay back" .-> MailboxM
+    
+    %% Mantle releases funds
+    MailboxM -->|"17. Deliver Release Instruction"| Ingress
+    Ingress -->|"18. Release Escrowed Funds<br/>(To User/Adapter)"| Receiver
+    
+    %% Optional adapter flow
+    Receiver -. "19. Optional: Execute<br/>on DeFi Protocol" .-> Adapter
+    
+    %% Action types
+    Actions -. "Action Types" .-> User
+
+    %% Privacy annotations
+    Ingress -. "🔒 Privacy:<br/>Only Ciphertext Hash<br/>Visible on Mantle" .-> Ingress
+    LendingCore -. "🔒 Privacy:<br/>Position Amounts Private<br/>Only Hash in Events" .-> LendingCore
+    Oracle -. "🔒 Privacy:<br/>Price Updates Private" .-> Oracle
+
+    %% Styling
+    style Mantle fill:#1a1a1a,stroke:#888,stroke-width:2px
+    style Sapphire fill:#2d5016,stroke:#4a9b2f,stroke-width:2px
+    style Hyperlane fill:#0f3057,stroke:#89cff0,stroke-width:2px
+    style Actions fill:#4a148c,stroke:#9c27b0,stroke-width:2px
+```
+
+**Catatan Arsitektur**:
+- **Mantle (Public)**: Hanya melihat encrypted payload hash, tidak bisa melihat action type, amount, atau receiver
+- **Sapphire (Confidential)**: Decrypt payload, manage positions secara private, calculate health factors
+- **Privacy**: Position amounts 100% private - hanya hash yang terlihat di event logs
+- **ROFL Oracle**: Price feeds di Sapphire untuk health factor calculation
+- **Hyperlane**: Cross-chain messaging antara Mantle dan Sapphire
+
+Private Lending Protocol yang memungkinkan user untuk:
+- **Supply** collateral secara private (amount tidak terlihat di Mantle)
+- **Borrow** dengan collateral sebagai jaminan
+- **Repay** pinjaman
+- **Withdraw** collateral
+- **Liquidation** untuk posisi yang tidak sehat
+
+Semua posisi (collateral & borrow amounts) **100% private** - hanya hash yang terlihat di event logs.
+
+### 7.1 Architecture
+
+Kontrak:
+- **Mantle**: `PrivateLendingIngress` (escrow funds + dispatch encrypted actions via Hyperlane)
+- **Sapphire**: `LendingCore` (decrypt actions, manage positions privately, calculate health factors, accrue interest)
+- **ISM**: `TrustedRelayerIsm` (deploy di Mantle, reusable)
+
+**Privacy Features**:
+- ✅ Action payload terenkripsi (receiver, amount, token, action type) - hanya ciphertext hash terlihat di Mantle
+- ✅ Position amounts **tidak terlihat** di event logs - hanya `positionHash` yang di-emit
+- ✅ Health factor calculation terjadi di Sapphire (confidential)
+- ✅ Interest accrual terjadi di Sapphire (confidential)
+
+### 7.2 Environment Variables
+
+Env tambahan (di luar env private transfer):
+```ini
+# Contract Addresses
+INGRESS_ADDRESS=0x...         # PrivateLendingIngress (Mantle)
+CORE_ADDRESS=0x...            # LendingCore (Sapphire)
+LENDING_PUBLIC_KEY=0x...32bytes  # Public key dari LendingCore untuk encryption
+
+# Hyperlane Domains
+MANTLE_DOMAIN=5003
+SAPPHIRE_DOMAIN=23295
+
+# Token Config
+TOKEN_TYPE=native|erc20
+TOKEN_ADDRESS=0x...           # wajib kalau erc20
+TOKEN_DECIMALS=18|6
+
+# Action Parameters
+AMOUNT=1.0
+DEPOSIT_ID=0x...              # untuk borrow/repay/withdraw (harus deposit dulu)
+ON_BEHALF=0x...               # optional (default: sender address)
+ACTION_ID=0x...                # untuk processAction (dari event EncryptedActionReceived)
+DISPATCH_GAS_FEE=0            # optional value saat dispatch
+PRIVATE_MEMO="optional"
+```
+
+### 7.3 Deployment
+
+**📖 Lihat [DEPLOYMENT_FLOW.md](./DEPLOYMENT_FLOW.md) untuk panduan deployment lengkap step-by-step dengan testing end-to-end.**
+
+Deploy PoC (ringkas):
+```bash
+# 1. Deploy Contracts
+MANTLE_MAILBOX=0x... npx hardhat run scripts/privatelending/deploy/deployIngress.ts --network mantleSepolia
+SAPPHIRE_MAILBOX=0x... npx hardhat run scripts/privatelending/deploy/deployLendingCore.ts --network sapphireTestnet
+MANTLE_MAILBOX=0x... TRUSTED_RELAYER=0x... npx hardhat run scripts/privatelending/deploy/deployISM.ts --network mantleSepolia
+
+# 2. Enroll Routers
+INGRESS_ADDRESS=0x... CORE_ADDRESS=0x... SAPPHIRE_DOMAIN=23295 \
+  npx hardhat run scripts/privatelending/enroll/enrollIngress.ts --network mantleSepolia
+CORE_ADDRESS=0x... INGRESS_ADDRESS=0x... MANTLE_DOMAIN=5003 \
+  npx hardhat run scripts/privatelending/enroll/enrollLendingCore.ts --network sapphireTestnet
+
+# 3. Register ISM
+ROUTER_ADDRESS=0x... ISM_ADDRESS=0x... \
+  npx hardhat run scripts/privatelending/enroll/registerIsm.ts --network mantleSepolia
+
+# 4. Configure Token (WAJIB sebelum bisa digunakan)
+npx hardhat console --network sapphireTestnet
+> const core = await ethers.getContractAt("LendingCore", "0x...")
+> await core.configureToken(
+    "0xTOKEN",      // token address
+    7500,           // LTV (75%)
+    8000,           // liquidation threshold (80%)
+    1000,           // borrow rate (10% APR, dalam bps)
+    500             // supply rate (5% APR, dalam bps)
+  )
+
+# 5. Setup Oracle (ROFL Oracle - Recommended, atau Manual Update untuk Testing)
+# Option A: ROFL Oracle (Production)
+CORE_ADDRESS=0x... TOKEN_ADDRESS=0x... ROFL_ORACLE_ADDRESS=0x... \
+  npx hardhat run scripts/privatelending/service/setRoflOracle.ts --network sapphireTestnet
+CORE_ADDRESS=0x... TOKEN_ADDRESS=0x... \
+  npx hardhat run scripts/privatelending/service/updatePriceFromRoflOracle.ts --network sapphireTestnet
+
+# Option B: Manual Update (Testing)
+CORE_ADDRESS=0x... TOKEN_ADDRESS=0x... MANUAL_PRICE=1.0 \
+  npx hardhat run scripts/privatelending/service/updatePrice.ts --network sapphireTestnet
+```
+
+### 7.4 Usage Flow
+
+**Setelah deployment & setup oracle**, ikuti flow berikut:
+
+#### 7.4.1 Supply (Deposit Collateral)
+
+```bash
+TOKEN_TYPE=native TOKEN_DECIMALS=18 AMOUNT=1 \
+LENDING_PUBLIC_KEY=0x... \
+INGRESS_ADDRESS=0x... \
+npx hardhat run scripts/privatelending/service/supply.ts --network mantleSepolia
+```
+
+**Output**: `ACTION_ID` - catat untuk process di Sapphire.
+
+#### 7.4.2 Process Action di Sapphire
+
+Setelah submit action, **WAJIB process di Sapphire**:
+
+```bash
+CORE_ADDRESS=0x... ACTION_ID=0x... \
+npx hardhat run scripts/privatelending/service/processAction.ts --network sapphireTestnet
+```
+
+**Catatan**: 
+- Script ini akan decrypt payload, update position, calculate health factor, dan dispatch release instruction (jika perlu)
+- Untuk borrow/withdraw, release instruction akan dikirim ke Mantle via Hyperlane
+- Relayer akan forward message, dan user akan menerima funds di Mantle
+
+#### 7.4.3 Borrow (Pakai Deposit ID dari Supply)
+
+```bash
+DEPOSIT_ID=0x... TOKEN_TYPE=native TOKEN_DECIMALS=18 AMOUNT=0.5 \
+LENDING_PUBLIC_KEY=0x... \
+INGRESS_ADDRESS=0x... \
+npx hardhat run scripts/privatelending/service/borrow.ts --network mantleSepolia
+```
+
+**Catatan**: 
+- `DEPOSIT_ID` harus dari deposit sebelumnya (bisa dari supply atau deposit terpisah)
+- Health factor akan di-check di Sapphire saat processAction
+- Jika HF < 1.0, borrow akan gagal
+
+#### 7.4.4 Repay (Bayar Pinjaman)
+
+**Deposit dulu untuk repay**:
+```bash
+TOKEN_TYPE=native TOKEN_DECIMALS=18 AMOUNT=0.2 \
+INGRESS_ADDRESS=0x... \
+npx hardhat run scripts/privatetransfer/service/deposit.ts --network mantleSepolia \
+  --type native --amount 0.2 --ingress $INGRESS_ADDRESS
+```
+
+**Lalu submit repay action**:
+```bash
+DEPOSIT_ID=0x... TOKEN_TYPE=native TOKEN_DECIMALS=18 AMOUNT=0.2 \
+LENDING_PUBLIC_KEY=0x... \
+INGRESS_ADDRESS=0x... \
+npx hardhat run scripts/privatelending/service/repay.ts --network mantleSepolia
+```
+
+#### 7.4.5 Withdraw (Tarik Collateral)
+
+```bash
+DEPOSIT_ID=0x... TOKEN_TYPE=native TOKEN_DECIMALS=18 AMOUNT=0.3 \
+LENDING_PUBLIC_KEY=0x... \
+INGRESS_ADDRESS=0x... \
+npx hardhat run scripts/privatelending/service/withdraw.ts --network mantleSepolia
+```
+
+**Catatan**: 
+- Health factor akan di-check setelah withdraw
+- Jika HF < 1.0 setelah withdraw, action akan gagal
+
+### 7.5 Check Position & Health Factor
+
+```bash
+npx hardhat console --network sapphireTestnet
+> const core = await ethers.getContractAt("LendingCore", "0x...")
+> const pos = await core.positions("0xUSER_ADDRESS", "0xTOKEN_ADDRESS")
+> console.log("Collateral:", pos.collateral.toString())
+> console.log("Borrow:", pos.borrow.toString())
+> const hf = await core.calculateHealthFactorForToken("0xUSER_ADDRESS", "0xTOKEN_ADDRESS")
+> console.log("Health Factor:", hf.toString())  // 1e18 = 1.0
+```
+
+**Catatan**: 
+- Position amounts **tidak terlihat** di event logs - hanya `positionHash`
+- User bisa verify position hash via `computePositionHash(user, token)`
+- Lihat [PRIVACY_POSITION_EVENTS.md](./PRIVACY_POSITION_EVENTS.md) untuk detail privacy
+
+### 7.6 Important Notes
+
+**⚠️ PENTING**:
+- **Token config WAJIB**: Setiap token harus di-configure dulu via `configureToken()` sebelum bisa digunakan (sama seperti Aave)
+  - LTV, liquidation threshold, borrow rate, supply rate harus di-set
+  - Tanpa config, token tidak bisa digunakan - akan revert dengan "token not enabled"
+- **Oracle**: 
+  - **ROFL Oracle** adalah solusi yang direkomendasikan untuk Oasis Sapphire (lihat [Oasis Docs](https://docs.oasis.io/build/use-cases/price-oracle/))
+  - Untuk testing, bisa pakai manual update via `updatePrice.ts`
+  - Price harus di-update sebelum borrow/withdraw (untuk health factor calculation)
+- **Deposit ID**: 
+  - Harus milik pengirim; skrip melakukan pre-check dasar
+  - Bisa dipakai berkali-kali sampai saldo habis (partial consumption)
+- **ERC20**: 
+  - Set `TOKEN_TYPE=erc20`, `TOKEN_ADDRESS`, `TOKEN_DECIMALS` sesuai token
+  - Pastikan token sudah di-approve ke `INGRESS_ADDRESS`
+- **Health Factor**: 
+  - Harus >= 1.0 untuk bisa borrow/withdraw
+  - Jika HF < 1.0, posisi bisa diliquidate
+- **Privacy**: 
+  - Position amounts **100% private** - hanya hash di event logs
+  - Action payload terenkripsi - hanya ciphertext hash terlihat di Mantle
+  - Lihat [PRIVACY_POSITION_EVENTS.md](./PRIVACY_POSITION_EVENTS.md) untuk detail
+
+**📚 Dokumentasi Lengkap**:
+- [DEPLOYMENT_FLOW.md](./DEPLOYMENT_FLOW.md) - Panduan deployment lengkap dengan testing end-to-end
+- [TESTING_FLOW.md](./TESTING_FLOW.md) - Flow testing lengkap
+- [PRIVATE_LENDING_FLOW.md](./PRIVATE_LENDING_FLOW.md) - Flow detail dan troubleshooting
+- [PRIVACY_POSITION_EVENTS.md](./PRIVACY_POSITION_EVENTS.md) - Penjelasan privacy events
+
+---
+
+## 8. Optional: Multiple Tester Accounts
 
 `requestTransfer.ts` memilih wallet dari env (prioritas):
 1. `TESTER_PRIVATE_KEY`
@@ -276,7 +588,7 @@ After the relayer finishes, funds will be **directly transferred** to the receiv
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
@@ -287,10 +599,17 @@ After the relayer finishes, funds will be **directly transferred** to the receiv
 
 ---
 
-## 9. References
+## 10. References
 
+### Private Transfer
 - Oasis Sapphire encrypted tx & local testing [[1]](https://docs.oasis.io/build/sapphire/develop/testing#ethers)
 - Hyperlane Mailbox, hooks & ISMs [[2]](https://docs.hyperlane.xyz/docs/guides/create-custom-hook-and-ism), [[3]](https://docs.hyperlane.xyz/docs/protocol/core/mailbox)
-- Hyperlane fee model & Interchain Gas Paymaster [[4]](https://docs.hyperlane.xyz/docs/protocol/core/fees), [[4]](https://docs.hyperlane.xyz/docs/protocol/core/interchain-gas-payment)
+- Hyperlane fee model & Interchain Gas Paymaster [[4]](https://docs.hyperlane.xyz/docs/protocol/core/fees), [[5]](https://docs.hyperlane.xyz/docs/protocol/core/interchain-gas-payment)
+
+### Private Lending
+- Oasis ROFL Price Oracle [[6]](https://docs.oasis.io/build/use-cases/price-oracle/)
+- ROFL Price Oracle Example [[7]](https://github.com/oasisprotocol/demo-rofl)
+- Oasis Sapphire Docs [[8]](https://docs.oasis.io/build/sapphire/)
+- Hyperlane Docs [[9]](https://docs.hyperlane.xyz/)
 
 Dengan alur ini, data sensitif (alamat penerima, jumlah, memo) hanya pernah muncul dalam bentuk terenkripsi di Mantle. Dekripsi dan keputusan akhir sepenuhnya terjadi di Sapphire melalui `Sapphire.decrypt`, sehingga Anda mendapatkan privacy layer ala Oasis di atas Hyperlane. Selamat bereksperimen! 🚀

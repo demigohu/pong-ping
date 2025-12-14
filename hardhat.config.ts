@@ -9,6 +9,10 @@ const config: HardhatUserConfig = {
     version: "0.8.24",
     settings: {
       evmVersion: "paris",
+      optimizer: {
+        enabled: true,
+        runs: 200, // Lower runs = smaller bytecode, higher gas cost (good for deployment)
+      },
     },
   },
   sourcify: {
