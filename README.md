@@ -273,86 +273,72 @@ After the relayer finishes, funds will be **directly transferred** to the receiv
 Berikut diagram arsitektur high-level dari alur private lending (Mantle → Sapphire → Mantle) menggunakan Hyperlane:
 
 ```mermaid
-flowchart TD
+flowchart TB
+ subgraph Mantle["Mantle Sepolia (Public Chain)"]
+        User["👤 User Wallet<br>(Submit Actions)"]
+        Ingress["PrivateLendingIngress<br>(Escrow Funds +<br>Hyperlane Router)"]
+        MailboxM["Hyperlane Mailbox<br>(Mantle)"]
+        Receiver["💰 User Wallet<br>(Receive Funds)"]
+  end
+ subgraph Hyperlane["Hyperlane Relayer"]
+        Relayer["Hyperlane Relayer<br>(PRIVATE_KEY)"]
+  end
+ subgraph Sapphire["Oasis Sapphire (Confidential EVM)"]
+        MailboxS["Hyperlane Mailbox<br>(Sapphire)"]
+        LendingCore["LendingCore<br>(Decrypt Actions,<br>Manage Positions,<br>Calculate HF,<br>Accrue Interest)"]
+        Oracle["ROFL Oracle<br>(Price Feeds)"]
+  end
+ subgraph Actions["Encrypted Actions"]
+        Supply["SUPPLY<br>(Deposit Collateral)"]
+        Borrow["BORROW<br>(Borrow with Collateral)"]
+        Repay["REPAY<br>(Pay Back Loan)"]
+        Withdraw["WITHDRAW<br>(Withdraw Collateral)"]
+        Liquidate["LIQUIDATE<br>(Liquidate Position)"]
+  end
+    User -- "1. Deposit Funds<br>(Native/ERC20)" --> Ingress
+    User -- "2. Submit Encrypted Action<br>(Ciphertext Hash Only)" --> Ingress
+    Ingress -- "3. Escrow Funds<br>(Amount Visible)" --> Ingress
+    Ingress -- "4. Dispatch Encrypted Payload<br>(Value = 0, Ciphertext Only)" --> MailboxM
+    MailboxM -. "5. Forward Message<br>(Mantle → Sapphire)" .-> Relayer
+    Relayer -. "6. Relay over Hyperlane" .-> MailboxS
+    MailboxS -- "7. Deliver Encrypted Action" --> LendingCore
+    LendingCore -- "8. Query Price" --> Oracle
+    Oracle -- "9. Return Price Data" --> LendingCore
+    LendingCore -- "10. Decrypt Payload<br>(Sapphire.decrypt)" --> LendingCore
+    LendingCore -- "11. Update Position<br>(Private State)" --> LendingCore
+    LendingCore -- "12. Calculate Health Factor<br>(Confidential)" --> LendingCore
+    LendingCore -- "13. Accrue Interest<br>(Compound-style)" --> LendingCore
+    LendingCore -- "14. Build Release Instruction<br>(If BORROW/WITHDRAW/LIQUIDATE)" --> MailboxS
+    MailboxS -. "15. Send Release Instruction<br>(Sapphire → Mantle)" .-> Relayer
+    Relayer -. "16. Relay back" .-> MailboxM
+    MailboxM -- "17. Deliver Release Instruction" --> Ingress
+    Ingress -- "18. Release Escrowed Funds<br>(To User/Adapter)" --> Receiver
+    Actions -. Action Types .-> User
+    Ingress -. 🔒 Privacy:<br>Only Ciphertext Hash<br>Visible on Mantle .-> Ingress
+    LendingCore -. 🔒 Privacy:<br>Position Amounts Private<br>Only Hash in Events .-> LendingCore
+    Oracle -. 🔒 Privacy:<br>Price Updates Private .-> Oracle
+
+     User:::chain
+     Ingress:::chain
+     MailboxM:::chain
+     Receiver:::chain
+     Relayer:::relay
+     MailboxS:::chain
+     LendingCore:::confidential
+     Oracle:::confidential
+     Supply:::action
+     Borrow:::action
+     Repay:::action
+     Withdraw:::action
+     Liquidate:::action
     classDef chain fill:#1a1a1a,stroke:#888,color:#fff
     classDef relay fill:#0f3057,stroke:#89cff0,color:#fff
     classDef confidential fill:#2d5016,stroke:#4a9b2f,color:#fff
     classDef action fill:#4a148c,stroke:#9c27b0,color:#fff
-
-    subgraph Mantle["Mantle Sepolia (Public Chain)"]
-        User["👤 User Wallet<br/>(Submit Actions)"]:::chain
-        Ingress["PrivateLendingIngress<br/>(Escrow Funds +<br/>Hyperlane Router)"]:::chain
-        MailboxM["Hyperlane Mailbox<br/>(Mantle)"]:::chain
-        Receiver["💰 User Wallet<br/>(Receive Funds)"]:::chain
-        Adapter["Adapter Contract<br/>(Optional - for DeFi)"]:::chain
-    end
-
-    subgraph Hyperlane["Hyperlane Relayer"]
-        Relayer["Hyperlane Relayer<br/>(PRIVATE_KEY)"]:::relay
-    end
-
-    subgraph Sapphire["Oasis Sapphire (Confidential EVM)"]
-        MailboxS["Hyperlane Mailbox<br/>(Sapphire)"]:::chain
-        LendingCore["LendingCore<br/>(Decrypt Actions,<br/>Manage Positions,<br/>Calculate HF,<br/>Accrue Interest)"]:::confidential
-        Oracle["ROFL Oracle<br/>(Price Feeds)"]:::confidential
-    end
-
-    subgraph Actions["Encrypted Actions"]
-        Supply["SUPPLY<br/>(Deposit Collateral)"]:::action
-        Borrow["BORROW<br/>(Borrow with Collateral)"]:::action
-        Repay["REPAY<br/>(Pay Back Loan)"]:::action
-        Withdraw["WITHDRAW<br/>(Withdraw Collateral)"]:::action
-        Liquidate["LIQUIDATE<br/>(Liquidate Position)"]:::action
-    end
-
-    %% User submits action
-    User -->|"1. Deposit Funds<br/>(Native/ERC20)"| Ingress
-    User -->|"2. Submit Encrypted Action<br/>(Ciphertext Hash Only)"| Ingress
-    
-    %% Ingress escrows and dispatches
-    Ingress -->|"3. Escrow Funds<br/>(Amount Visible)"| Ingress
-    Ingress -->|"4. Dispatch Encrypted Payload<br/>(Value = 0, Ciphertext Only)"| MailboxM
-    
-    %% Hyperlane relay
-    MailboxM -. "5. Forward Message<br/>(Mantle → Sapphire)" .-> Relayer
-    Relayer -. "6. Relay over Hyperlane" .-> MailboxS
-    
-    %% Sapphire receives and processes
-    MailboxS -->|"7. Deliver Encrypted Action"| LendingCore
-    LendingCore -->|"8. Query Price"| Oracle
-    Oracle -->|"9. Return Price Data"| LendingCore
-    
-    %% LendingCore processes action
-    LendingCore -->|"10. Decrypt Payload<br/>(Sapphire.decrypt)"| LendingCore
-    LendingCore -->|"11. Update Position<br/>(Private State)"| LendingCore
-    LendingCore -->|"12. Calculate Health Factor<br/>(Confidential)"| LendingCore
-    LendingCore -->|"13. Accrue Interest<br/>(Compound-style)"| LendingCore
-    
-    %% Release instruction back to Mantle
-    LendingCore -->|"14. Build Release Instruction<br/>(If BORROW/WITHDRAW/LIQUIDATE)"| MailboxS
-    MailboxS -. "15. Send Release Instruction<br/>(Sapphire → Mantle)" .-> Relayer
-    Relayer -. "16. Relay back" .-> MailboxM
-    
-    %% Mantle releases funds
-    MailboxM -->|"17. Deliver Release Instruction"| Ingress
-    Ingress -->|"18. Release Escrowed Funds<br/>(To User/Adapter)"| Receiver
-    
-    %% Optional adapter flow
-    Receiver -. "19. Optional: Execute<br/>on DeFi Protocol" .-> Adapter
-    
-    %% Action types
-    Actions -. "Action Types" .-> User
-
-    %% Privacy annotations
-    Ingress -. "🔒 Privacy:<br/>Only Ciphertext Hash<br/>Visible on Mantle" .-> Ingress
-    LendingCore -. "🔒 Privacy:<br/>Position Amounts Private<br/>Only Hash in Events" .-> LendingCore
-    Oracle -. "🔒 Privacy:<br/>Price Updates Private" .-> Oracle
-
-    %% Styling
+    style Actions fill:#4a148c,stroke:#9c27b0,stroke-width:2px
     style Mantle fill:#1a1a1a,stroke:#888,stroke-width:2px
     style Sapphire fill:#2d5016,stroke:#4a9b2f,stroke-width:2px
     style Hyperlane fill:#0f3057,stroke:#89cff0,stroke-width:2px
-    style Actions fill:#4a148c,stroke:#9c27b0,stroke-width:2px
 ```
 
 **Catatan Arsitektur**:
